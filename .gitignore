@@ -1,0 +1,40 @@
+# ---- build output -------------------------------------------------------
+out/
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# ---- IDE ----------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.user
+.claude/
+
+# ---- third-party, fetched at configure time (see README: Building) ------
+# GLFW and Dear ImGui are pulled by CMake FetchContent.
+glfw/
+imgui-master/
+# The IBKR TWS API is redistributed under Interactive Brokers' own licence
+# and is NOT included here. Download it yourself (README: Building).
+TWS/
+
+# ---- runtime artefacts --------------------------------------------------
+mmalpha_*.csv
+scanner_params.xml
+*.dll
+*.log
+
+# ---- misc ---------------------------------------------------------------
+Thumbs.db
+desktop.ini
+
+# ---- work in progress, not part of this repo ----------------------------
+# Stat-arb research engine (ADF / OU / GARCH / Kelly-CPPI). Separate program
+# with its own main(); see README "What's next".
+imgui_bookvisuals_pairs.cpp
