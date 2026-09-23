@@ -34,7 +34,7 @@ the program is perfectly willing to tell you that the signal is worthless.
 Most order-book visualisers show you *size at price*. That is the aggregate. It throws away the
 one field that a Level-2 feed gives you and a Level-1 feed does not: **who posted the order**.
 
-On NASDAQ TotalView every displayed order carries an MPID — the four-letter code of the firm that
+On NASDAQ TotalView every displayed order carries an MPID , the four-letter code of the firm that
 posted it. Firms behave differently, and those differences are measurable and persistent. A
 patient two-sided market maker is not the same object as a sub-50ms flicker quoter, which is not
 the same object as an iceberg refilling the same price level, which is not the same object as
@@ -44,70 +44,7 @@ This program builds a behavioural profile per firm per venue, in real time, and 
 whether any of those profiles lead the mid price. That test is the whole point. Everything else
 is instrumentation.
 
----
 
-## The bug that defines the project
-
-This is the part worth reading, because it is the difference between a dashboard that looks
-plausible and one that is actually correct.
-
-IBKR's `updateMktDepthL2` is a **position-indexed** protocol. It does not send you order IDs. It
-sends you edits to a row number:
-
-```
-operation 0 = insert a new row at `position`   (rows below shift down)
-operation 1 = update the row at `position`
-operation 2 = delete the row at `position`     (rows below shift up)
-```
-
-The identity of a row being *deleted* is not in the delete message. IBKR routinely sends
-`operation=2` with an **empty** `marketMaker` field and a stale or zero price. The identity lives
-in *your* copy of the ladder, at that position — and only if you kept one.
-
-The original implementation keyed market-maker state by a composite string:
-
-```cpp
-// the bug
-std::string mm  = marketMaker.empty() ? "UNKNOWN" : marketMaker;
-std::string key = mm + "_" + std::to_string(int(price * 100)) + "_"
-                     + std::to_string(side) + "_" + std::to_string(ex);
-```
-
-Two independent defects, both silent:
-
-**1. A cancel synthesises a different key than the add did.** The add arrived as
-`GSCO_22750_1_0`. The cancel arrives with an empty name and a zero price, so it becomes
-`UNKNOWN_0_1_0`. The real entry is never marked dead, so it lives forever as a phantom line on
-the chart; meanwhile `UNKNOWN_*` keys accumulate without bound and every statistic derived from
-them is garbage.
-
-**2. `int(price * 100)` truncates.** `227.50 * 100` is `22749.999999999996` in IEEE-754 double.
-Truncation gives `22749`. The *same price level* randomly splits across two keys depending on
-floating-point representation.
-
-The fix is not a patch. It is modelling the book the way the protocol actually defines it:
-
-```cpp
-struct SideLadder {
-    Slot s[kMaxLadder];
-    int  n = 0;
-
-    void InsertAt(int pos, const Slot& v);            // rows below shift down
-
-    // Returns the slot that was removed, so the caller knows WHO cancelled.
-    bool EraseAt(int pos, Slot& out);                 // rows below shift up
-};
-```
-
-A cancel now reads its MPID, price and size **out of the slot being removed**. Prices are keyed
-with `llround(px * 10000.0)` — exact to a hundredth of a cent, never truncated. And
-"unattributed" stops being a dumping ground for lost information: `ANON` becomes identity `0`,
-a first-class participant you can measure, distinct from the venue aggregates (`NSDQ`, `ARCA`,
-`BATS`) which are not firms either but are not the same thing as an anonymous order.
-
-Every downstream number in this program depends on that state machine being right.
-
----
 
 ## Architecture
 
@@ -133,33 +70,7 @@ testable from a file.
                             UI              Dear ImGui / GLFW / OpenGL
 ```
 
-The **normalised `Event`** is the load-bearing abstraction. Recorder, analytics and UI consume
-*only* that struct — never the raw IB callback. Which is why live capture and file replay are
-literally the same code path, and why the synthetic feed can exercise the entire analytics stack
-when the tape is shut.
 
-### Threading
-
-There isn't any, and that is deliberate.
-
-`EReader::processMsgs()` dispatches callbacks on whichever thread calls it. This program calls it
-from the render loop, so ingest and analytics are single-threaded and need **no locks at all**.
-The socket is drained under a 6 ms frame budget so a burst of depth messages can never stall the
-UI:
-
-```cpp
-if (client->isConnected()) {
-    int64_t budgetEnd = NowNs() + 6ll * 1000000ll;
-    do { reader->processMsgs(); } while (NowNs() < budgetEnd);
-}
-```
-
-Choosing single-threaded here is a real decision, not an oversight. The analytics touch hundreds
-of per-participant structures per message; a mutex around that would cost more than the
-parallelism would buy, and a lock-free version would be a large amount of subtle code defending
-against a problem this workload does not have.
-
----
 
 ## What it measures
 
@@ -195,19 +106,7 @@ Only rows where `cFollow` later confirmed are marked **CONFIRMED**. Flagged size
 subtracted from the touch imbalance, so a book whose imbalance was manufactured is not read as
 real pressure.
 
-### On anonymity — what this explicitly does *not* claim
 
-`NSDQ` is not a firm. It is the aggregate of every order whose owner chose not to attribute it,
-and it is routinely a large fraction of displayed size. **You cannot recover who is
-behind it from Level-2 data, and any tool claiming otherwise is selling something.**
-
-What *is* recoverable is narrower and stated as such in the UI itself: (a) how anonymous size
-behaves relative to named size at the same price, and (b) whether the anonymous residual's
-*algorithmic* fingerprint — lifetime distribution, size quantisation, refill latency, standoff
-from the touch, two-sided fraction — matches a named MPID's. A high similarity score is a
-hypothesis worth testing. It is never an identification, and the panel says so on screen.
-
----
 
 ## Statistical honesty
 
@@ -239,26 +138,6 @@ depend on a behavioural assumption: the same asset cannot be in two places at on
 venue A's mid reliably leads venue B's at some lag, venue B has to catch up. The program
 subscribes to the same symbol on ISLAND / ARCA / BATS and measures the lagged cross-correlation
 directly.
-
----
-
-## Performance decisions
-
-**MPIDs are interned to `uint16`.** Every downstream structure is a flat array indexed by that
-id, so there is no string hashing anywhere in the hot path.
-
-**The heatmap stores a raster, not snapshots.** A bookmap does not need full order-book history —
-it needs a time × price grid. Storing two `2880 × 192` `uint16` rasters, bid and ask, costs **≈2 MB per
-stream**; the naive approach of retaining 100k depth snapshots costs **≈160 MB per stream** and
-draws far slower. Each column also caches its own peak value so the renderer never has to rescan
-550k cells to normalise the colour ramp.
-
-**Correlation work is rate-limited, not per-frame.** Lagged correlations are `O(window)` per
-pair across a 3000-sample ring. They run at 1 Hz. Book state updates at message rate, sampling at
-10 Hz, rendering at 60 Hz — three different cadences, each chosen for what it costs.
-
-**Profile vectors are pre-sized and never resized**, so a reference handed out to an analytics
-routine can never be invalidated by a later MPID being interned mid-loop.
 
 ---
 
